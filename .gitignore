@@ -1,0 +1,5 @@
+*.ts
+*.pt
+*.pth
+__pycache__/
+yoloe*.pt
