@@ -1,0 +1,6 @@
+numpy
+scipy
+opencv-python
+pyautogui
+ultralytics
+pyrealsense2
