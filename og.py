@@ -35,7 +35,7 @@ disparity_to_depth = rs.disparity_transform(False)
 spatial_filter  = rs.spatial_filter()   # smooths edges, fills small holes
 temporal_filter = rs.temporal_filter()  # reduces flicker/noise across frames
 
-frames = []
+all_depth_frames = []
 
 while True:
     # Read a frame from the video
@@ -51,7 +51,7 @@ while True:
 
     if not color_frame or not depth_frame: continue
 
-    frames.append()
+    # all_depth_frames.append(depth_frame)
     
     frame_bgr = np.asanyarray(color_frame.get_data())
     depth_image = np.asanyarray(depth_frame.get_data()).astype(np.float32) * depth_scale
@@ -171,6 +171,9 @@ while True:
     else:
         # Break the loop video feed is cut
         break
+
+all_depth_frames = np.stack(all_depth_frames, axis=0)  # shape (num_frames, H, W)
+np.save("depth_frames.npy", all_depth_frames)
 
 # Close the display window
 cv2.destroyAllWindows()
