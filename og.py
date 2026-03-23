@@ -50,11 +50,11 @@ while True:
     depth_frame = disparity_to_depth.process(depth_frame)
 
     if not color_frame or not depth_frame: continue
-
-    # all_depth_frames.append(depth_frame)
     
     frame_bgr = np.asanyarray(color_frame.get_data())
     depth_image = np.asanyarray(depth_frame.get_data()).astype(np.float32) * depth_scale
+
+    all_depth_frames.append(depth_image)
 
     frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
@@ -173,6 +173,8 @@ while True:
         break
 
 all_depth_frames = np.stack(all_depth_frames, axis=0)  # shape (num_frames, H, W)
+print("Saving depth frames to depth_frames.npy...")
+print(f"Depth frames shape: {all_depth_frames.shape}, dtype: {all_depth_frames.dtype}")
 np.save("depth_frames.npy", all_depth_frames)
 
 # Close the display window
