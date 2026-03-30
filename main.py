@@ -1,11 +1,10 @@
 import cv2
 from ultralytics import YOLO, YOLOE
-from ultralytics.utils.plotting import Annotator
 import pyrealsense2 as rs
 import numpy as np
 import time
 
-model = YOLOE("yoloe-11l-seg.pt")
+model = YOLOE("yoloe-11l-seg")
 # We'll target the "person" class (COCO class name)
 target_class_name = "person"
 
