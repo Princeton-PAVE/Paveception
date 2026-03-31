@@ -3,3 +3,4 @@
 *.pth
 __pycache__/
 yoloe*.pt
+*.DS_Store*
