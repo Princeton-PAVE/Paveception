@@ -129,23 +129,27 @@ def estimate_orientation_2d(cluster_points_2d: np.ndarray, delta_thresh: float =
             "theta_A": 0.0,
             "theta_B": 0.0,
             "delta": 0.0,
+            "delta_deg": 0.0,
             "num_points": cluster_points_2d.shape[0]
         }
 
-    # Step 1: find closest point D to origin
+    # Step 1: closest point
     dists = np.linalg.norm(cluster_points_2d, axis=1)
     D = cluster_points_2d[np.argmin(dists)]
 
-    # Step 2: compute angles relative to D
+    # Step 2: angles relative to D
     rel = cluster_points_2d - D
     angles = np.arctan2(rel[:, 1], rel[:, 0])
 
-    # Step 3: split into A and B based on median angle
-    median_angle = np.median(angles)
-    A = cluster_points_2d[angles <= median_angle]
-    B = cluster_points_2d[angles > median_angle]
+    # Step 3: sort by angle
+    idx = np.argsort(angles)
+    sorted_pts = cluster_points_2d[idx]
 
-    # Edge case: small splits
+    # Step 4: split
+    mid = len(sorted_pts) // 2
+    A = sorted_pts[:mid]
+    B = sorted_pts[mid:]
+
     if len(A) < 5 or len(B) < 5:
         theta = fit_line_ransac(cluster_points_2d)
         return {
@@ -155,30 +159,29 @@ def estimate_orientation_2d(cluster_points_2d: np.ndarray, delta_thresh: float =
             "theta_A": theta,
             "theta_B": theta,
             "delta": 0.0,
+            "delta_deg": 0.0,
             "num_points": cluster_points_2d.shape[0]
         }
 
-    # Step 4: fit lines to each group
+    # Step 5: fit lines
     theta_A = fit_line_ransac(A)
     theta_B = fit_line_ransac(B)
 
-    # Step 5: compare angle difference
-    delta = np.abs(theta_A - theta_B)
-    delta = min(delta, np.pi - delta)  # normalize to [0, pi/2]
+    # Step 6: angle difference
+    delta = abs(theta_A - theta_B)
+    delta = min(delta, np.pi - delta)
 
-    is_l_shaped = delta > delta_thresh
-    
-    if is_l_shaped:
-        # L-shape detected → choose dominant line (more points)
+    is_L = delta > delta_thresh
+
+    if is_L:
         theta = theta_A if len(A) > len(B) else theta_B
     else:
-        # Single edge → fit all points
         theta = fit_line_ransac(cluster_points_2d)
 
     return {
         "theta": theta,
         "theta_deg": np.rad2deg(theta),
-        "is_l_shaped": is_l_shaped,
+        "is_l_shaped": is_L,
         "theta_A": theta_A,
         "theta_B": theta_B,
         "delta": delta,
