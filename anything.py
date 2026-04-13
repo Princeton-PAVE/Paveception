@@ -1,13 +1,17 @@
 import torch
+
+from da3_pointcloud import apply_da3_runtime_compatibility, default_inference_device
+
+apply_da3_runtime_compatibility()
 from depth_anything_3.api import DepthAnything3
 
-# Load model from Hugging Face Hub
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Load model from Hugging Face Hub (CUDA → Apple MPS → CPU)
+device = default_inference_device()
 model = DepthAnything3.from_pretrained("depth-anything/da3metric-large")
 model = model.to(device=device)
 
 # Run inference on images
-images = ["download.jpeg"]  # List of image paths, PIL Images, or numpy arrays
+images = ["room1.jpg"]  # List of image paths, PIL Images, or numpy arrays
 prediction = model.inference(
     images,
     export_dir="output",

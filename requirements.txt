@@ -1,6 +1,12 @@
-numpy
+# Depth Anything 3 and other deps need numpy 1.x; rerun-sdk 0.26+ requires numpy 2 — pin older rerun.
+numpy>=1.26,<2
 scipy
 opencv-python
 pyautogui
 ultralytics
 pyrealsense2
+pyarrow>=14.0.2
+rerun-sdk>=0.21.0,<0.26
+transformers
+pillow
+scikit-learn
