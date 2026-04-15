@@ -3,6 +3,70 @@ from ultralytics import YOLO, YOLOE
 import numpy as np
 import pyrealsense2 as rs
 
+
+def depth_to_xyz(depth_image, intrinsics):
+    h, w = depth_image.shape
+    u, v = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    z = depth_image
+    x = (u - intrinsics.ppx) * z / intrinsics.fx
+    y = (v - intrinsics.ppy) * z / intrinsics.fy
+    return x, y, z
+
+
+def fit_plane_from_points(points):
+    p1, p2, p3 = points
+    v1 = p2 - p1
+    v2 = p3 - p1
+    normal = np.cross(v1, v2)
+    norm = np.linalg.norm(normal)
+    if norm < 1e-9:
+        return None
+    normal = normal / norm
+    d = -np.dot(normal, p1)
+    return np.array([normal[0], normal[1], normal[2], d], dtype=np.float32)
+
+
+def refine_plane_svd(inlier_points):
+    centroid = np.mean(inlier_points, axis=0)
+    centered = inlier_points - centroid
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    normal = vh[-1]
+    normal = normal / (np.linalg.norm(normal) + 1e-12)
+    d = -np.dot(normal, centroid)
+    return np.array([normal[0], normal[1], normal[2], d], dtype=np.float32)
+
+
+def fit_ground_plane_ransac(points, iterations=150, dist_thresh=0.05):
+    if points.shape[0] < 3:
+        return None
+
+    best_plane = None
+    best_inlier_mask = None
+    best_inlier_count = 0
+    rng = np.random.default_rng()
+
+    for _ in range(iterations):
+        idx = rng.choice(points.shape[0], size=3, replace=False)
+        plane = fit_plane_from_points(points[idx])
+        if plane is None:
+            continue
+
+        a, b, c, d = plane
+        distances = np.abs(points @ np.array([a, b, c]) + d)
+        inlier_mask = distances < dist_thresh
+        inlier_count = int(np.count_nonzero(inlier_mask))
+
+        if inlier_count > best_inlier_count:
+            best_inlier_count = inlier_count
+            best_inlier_mask = inlier_mask
+            best_plane = plane
+
+    if best_plane is None or best_inlier_mask is None or best_inlier_count < 3:
+        return None
+
+    refined_plane = refine_plane_svd(points[best_inlier_mask])
+    return refined_plane
+
 # Load the YOLO11 model
 # model = YOLO("/Users/mayanksengupta/Desktop/CV_Training/runs/segment/train3/weights/best.pt")
 
@@ -14,6 +78,8 @@ model.set_classes(names, model.get_text_pe(names))
 # Loop through the video frames
 moveYOLOWindow = True
 moveMaskWindow = True
+moveDepthWindow = True
+moveGroundMaskWindow = True
 i = 0
 interval = 1
 
@@ -33,12 +99,18 @@ depth_sensor = profile.get_device().first_depth_sensor()
 depth_sensor.set_option(rs.option.laser_power, 360)
 depth_scale = depth_sensor.get_depth_scale()
 align = rs.align(rs.stream.color)
+depth_intrinsics = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
 
 depth_to_disparity = rs.disparity_transform(True)
 disparity_to_depth = rs.disparity_transform(False)
  
 spatial_filter  = rs.spatial_filter()   # smooths edges, fills small holes
 temporal_filter = rs.temporal_filter()  # reduces flicker/noise across frames
+
+GROUND_MIN_DEPTH_M = 0.5
+GROUND_RANSAC_THRESH_M = 0.05
+GROUND_RANSAC_ITERS = 150
+GROUND_MAX_DEPTH_M = 8.0
 
 all_depth_frames = []
 
@@ -58,6 +130,31 @@ while True:
     
     frame_bgr = np.asanyarray(color_frame.get_data())
     depth_image = np.asanyarray(depth_frame.get_data()).astype(np.float32) * depth_scale
+
+    x3d, y3d, z3d = depth_to_xyz(depth_image, depth_intrinsics)
+    h, w = depth_image.shape
+    bottom_half_mask = np.zeros((h, w), dtype=bool)
+    bottom_half_mask[h // 2 :, :] = True
+
+    candidate_mask = (
+        bottom_half_mask
+        & (z3d > GROUND_MIN_DEPTH_M)
+        & (z3d < GROUND_MAX_DEPTH_M)
+    )
+    candidate_points = np.column_stack((x3d[candidate_mask], y3d[candidate_mask], z3d[candidate_mask]))
+
+    plane = fit_ground_plane_ransac(
+        candidate_points,
+        iterations=GROUND_RANSAC_ITERS,
+        dist_thresh=GROUND_RANSAC_THRESH_M,
+    )
+
+    ground_mask = np.zeros_like(depth_image, dtype=bool)
+    if plane is not None:
+        a, b, c, d = plane
+        distances = np.abs(a * x3d + b * y3d + c * z3d + d)
+        valid_for_ground = (z3d > GROUND_MIN_DEPTH_M) & (z3d < GROUND_MAX_DEPTH_M)
+        ground_mask = valid_for_ground & (distances < GROUND_RANSAC_THRESH_M)
 
     all_depth_frames.append(depth_image)
 
@@ -89,14 +186,27 @@ while True:
                     mask = result.masks.data[i].cpu().numpy()  # shape (H, W)
                     print(mask.shape, depth_image.shape)
                     # reshape the depth image to match the mask if needed
-                    depth_image_resized = cv2.resize(depth_image, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)   
+                    depth_image_resized = cv2.resize(depth_image, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    ground_mask_resized = cv2.resize(
+                        ground_mask.astype(np.uint8),
+                        (mask.shape[1], mask.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    ).astype(bool)
 
-                    masked_depth = depth_image_resized * mask
-                    object_depth = np.median(masked_depth[masked_depth > 0])  # Average
+                    mask_bool = mask > 0.5
+                    valid_obj_pixels = (
+                        mask_bool
+                        & (~ground_mask_resized)
+                        & (depth_image_resized > GROUND_MIN_DEPTH_M)
+                    )
+                    valid_depth_values = depth_image_resized[valid_obj_pixels]
 
-                    points.append((box_mid_x, object_depth))
-
-                    print(f"Track ID: {track_id}, Class: {cls}, Confidence: {conf:.2f}, Depth: {object_depth:.2f}m")
+                    if valid_depth_values.size > 0:
+                        object_depth = float(np.median(valid_depth_values))
+                        points.append((box_mid_x, object_depth))
+                        print(f"Track ID: {track_id}, Class: {cls}, Confidence: {conf:.2f}, Depth: {object_depth:.2f}m")
+                    else:
+                        print(f"Track ID: {track_id}, Class: {cls}, Confidence: {conf:.2f}, Depth: NaN (no non-ground depth)")
                     
         # Azimuth estimation
 
@@ -171,9 +281,16 @@ while True:
             moveYOLOWindow=False
         
         cv2.imshow("Depth", cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=255.0 / RADAR_MAX_RANGE_M), cv2.COLORMAP_JET))
-        if moveMaskWindow:
+        if moveDepthWindow:
             cv2.moveWindow("Depth", 700, 500)
-            moveMaskWindow = False
+            moveDepthWindow = False
+
+        ground_vis = np.zeros_like(depth_image, dtype=np.uint8)
+        ground_vis[ground_mask] = 255
+        cv2.imshow("Ground Mask", ground_vis)
+        if moveGroundMaskWindow:
+            cv2.moveWindow("Ground Mask", 0, 0)
+            moveGroundMaskWindow = False
 
         # Break the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord("q"):
