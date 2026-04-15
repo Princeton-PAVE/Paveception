@@ -107,103 +107,103 @@ while cap.isOpened():
     Q = np.zeros((4,4))
     cv2.stereoRectify(K, np.zeros((1,5)), K, np.zeros((1,5)), (disparity.shape[1], disparity.shape[0]), R=np.eye(3), T=np.array([1, 0, 0]), alpha=-1, Q=Q)
     # Ensure disparity is float32 for OpenCV
-    disparity_32f = disparity.astype(np.float32)
-    points_3d = cv2.reprojectImageTo3D(disparity_32f, Q)
+    # disparity_32f = disparity.astype(np.float32)
+    points_3d = cv2.reprojectImageTo3D(disparity, Q)
 
     points_3d[:,:,2] *= -1
-    points_3d *= 0.1
+    # points_3d *= 0.1
 
     points_flat = points_3d.reshape(-1, 3)
     colors_flat = img.reshape(-1, 3)
 
 
-    chair_points_3d = None
-    if results[0].masks is not None:
-        masks = results[0].masks.data.cpu().numpy()
-        class_indices = results[0].boxes.cls.cpu().numpy()
+    # chair_points_3d = None
+    # if results[0].masks is not None:
+    #     masks = results[0].masks.data.cpu().numpy()
+    #     class_indices = results[0].boxes.cls.cpu().numpy()
 
-        combined_mask = masks[0]
-        for mask in masks[1:]:
-            combined_mask = np.logical_or(combined_mask, mask)
+    #     combined_mask = masks[0]
+    #     for mask in masks[1:]:
+    #         combined_mask = np.logical_or(combined_mask, mask)
 
-        combined_mask = cv2.resize(combined_mask.astype('uint8'), (frame.shape[1], frame.shape[0]))
-        masks_flat = combined_mask.reshape(-1).astype(bool)
-        points_flat = points_flat[masks_flat]
-        colors_flat = colors_flat[masks_flat]
+    #     combined_mask = cv2.resize(combined_mask.astype('uint8'), (frame.shape[1], frame.shape[0]))
+    #     masks_flat = combined_mask.reshape(-1).astype(bool)
+    #     points_flat = points_flat[masks_flat]
+    #     colors_flat = colors_flat[masks_flat]
 
-        # Save 3D points for orientation fitting
-        chair_points_3d = points_flat.copy()
+        # # Save 3D points for orientation fitting
+        # chair_points_3d = points_flat.copy()
 
 
-    # --- DBSCAN Filtering ---
-    if len(points_flat) > 10 and results[0].masks is not None:
-        clustering = DBSCAN(eps=0.5, min_samples=10).fit(points_flat)
-        labels = clustering.labels_
-        mask_noise = labels != -1
-        points_flat = points_flat[mask_noise]
-        colors_flat = colors_flat[mask_noise]
-    # -------------------------
+    # # --- DBSCAN Filtering ---
+    # if len(points_flat) > 10 and results[0].masks is not None:
+    #     clustering = DBSCAN(eps=0.5, min_samples=10).fit(points_flat)
+    #     labels = clustering.labels_
+    #     mask_noise = labels != -1
+    #     points_flat = points_flat[mask_noise]
+    #     colors_flat = colors_flat[mask_noise]
+    # # -------------------------
 
-    # --- 3D Oriented Bounding Boxes for rerun ---
-    if chair_points_3d is not None and len(chair_points_3d) > 10:
-        orientation_results = process_chair_points(chair_points_3d, dbscan_eps=0.05, dbscan_min_samples=10, plane="xz")
-        for cluster_id, info in orientation_results.items():
-            centroid = info["centroid_3d"]
-            theta = info["theta"]
-            # Box size (heuristic, e.g., 0.3m x 0.3m x 0.5m)
-            box_w, box_h, box_y = 0.3, 0.3, 0.5
-            c, s = np.cos(theta), np.sin(theta)
-            dx = box_w / 2
-            dz = box_h / 2
-            dy = box_y / 2
-            # 8 corners of the box in local frame (XZ rectangle extruded in Y)
-            local_corners = np.array([
-                [dx,  dy, dz],
-                [dx,  dy, -dz],
-                [-dx, dy, -dz],
-                [-dx, dy, dz],
-                [dx, -dy, dz],
-                [dx, -dy, -dz],
-                [-dx, -dy, -dz],
-                [-dx, -dy, dz],
-            ])
-            # Rotation matrix for XZ
-            rot = np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
-            rotated = local_corners @ rot.T
-            corners_3d = rotated + centroid
+    # # --- 3D Oriented Bounding Boxes for rerun ---
+    # if chair_points_3d is not None and len(chair_points_3d) > 10:
+    #     orientation_results = process_chair_points(chair_points_3d, dbscan_eps=0.05, dbscan_min_samples=10, plane="xz")
+    #     for cluster_id, info in orientation_results.items():
+    #         centroid = info["centroid_3d"]
+    #         theta = info["theta"]
+    #         # Box size (heuristic, e.g., 0.3m x 0.3m x 0.5m)
+    #         box_w, box_h, box_y = 0.3, 0.3, 0.5
+    #         c, s = np.cos(theta), np.sin(theta)
+    #         dx = box_w / 2
+    #         dz = box_h / 2
+    #         dy = box_y / 2
+    #         # 8 corners of the box in local frame (XZ rectangle extruded in Y)
+    #         local_corners = np.array([
+    #             [dx,  dy, dz],
+    #             [dx,  dy, -dz],
+    #             [-dx, dy, -dz],
+    #             [-dx, dy, dz],
+    #             [dx, -dy, dz],
+    #             [dx, -dy, -dz],
+    #             [-dx, -dy, -dz],
+    #             [-dx, -dy, dz],
+    #         ])
+    #         # Rotation matrix for XZ
+    #         rot = np.array([[c, 0, -s], [0, 1, 0], [s, 0, c]])
+    #         rotated = local_corners @ rot.T
+    #         corners_3d = rotated + centroid
 
-            # Log 3D box to rerun
-            rr.log(
-                f"world/object/chair_box_{cluster_id}",
-                rr.Boxes3D(
-                    centers=[centroid],
-                    half_sizes=[[dx, dy, dz]],
-                    rotations=[
-                        [
-                            [c, 0, -s],
-                            [0, 1, 0],
-                            [s, 0, c]
-                        ]
-                    ],
-                    colors=[[0, 255, 0]]
-                )
-            )
+    #         # Log 3D box to rerun
+    #         rr.log(
+    #             f"world/object/chair_box_{cluster_id}",
+    #             rr.Boxes3D(
+    #                 centers=[centroid],
+    #                 half_sizes=[[dx, dy, dz]],
+    #                 rotations=[
+    #                     [
+    #                         [c, 0, -s],
+    #                         [0, 1, 0],
+    #                         [s, 0, c]
+    #                     ]
+    #                 ],
+    #                 colors=[[0, 255, 0]]
+    #             )
+    #         )
 
-            # Optionally, also draw 2D projection on annotated_frame for visual feedback
-            rvec = np.zeros((3, 1))
-            tvec = np.zeros((3, 1))
-            imgpts, _ = cv2.projectPoints(corners_3d, rvec, tvec, K, np.zeros((1, 5)))
-            imgpts = imgpts.squeeze().astype(int)
-            # Draw box edges (12 lines)
-            edges = [
-                (0,1),(1,2),(2,3),(3,0), # top
-                (4,5),(5,6),(6,7),(7,4), # bottom
-                (0,4),(1,5),(2,6),(3,7)  # sides
-            ]
-            for i,j in edges:
-                pt1 = tuple(imgpts[i])
-                pt2 = tuple(imgpts[j])
-                cv2.line(annotated_frame, pt1, pt2, (0,255,0), 2)
+    #         # Optionally, also draw 2D projection on annotated_frame for visual feedback
+    #         rvec = np.zeros((3, 1))
+    #         tvec = np.zeros((3, 1))
+    #         imgpts, _ = cv2.projectPoints(corners_3d, rvec, tvec, K, np.zeros((1, 5)))
+    #         imgpts = imgpts.squeeze().astype(int)
+    #         # Draw box edges (12 lines)
+    #         edges = [
+    #             (0,1),(1,2),(2,3),(3,0), # top
+    #             (4,5),(5,6),(6,7),(7,4), # bottom
+    #             (0,4),(1,5),(2,6),(3,7)  # sides
+    #         ]
+    #         for i,j in edges:
+    #             pt1 = tuple(imgpts[i])
+    #             pt2 = tuple(imgpts[j])
+    #             cv2.line(annotated_frame, pt1, pt2, (0,255,0), 2)
 
     rr.log(
         "world/camera",
