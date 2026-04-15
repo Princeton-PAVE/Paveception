@@ -3,6 +3,11 @@ from ultralytics import YOLO, YOLOE
 import numpy as np
 import pyrealsense2 as rs
 
+try:
+    import rerun as rr
+except ImportError:
+    rr = None
+
 
 def depth_to_xyz(depth_image, intrinsics):
     h, w = depth_image.shape
@@ -203,7 +208,23 @@ OBSTACLE_MIN_SIZE_M = 0.15
 OBSTACLE_DRAW_SIZE_SCALE_M = 0.6
 CLUSTER_MAX_POINTS_FOR_RUNTIME = 6000
 
+USE_RERUN = False
+RERUN_SPAWN_VIEWER = True
+RERUN_MAX_POINTS = 20000
+
+
+def maybe_downsample_points(points, max_points):
+    if points.shape[0] <= max_points:
+        return points
+    idx = np.random.choice(points.shape[0], max_points, replace=False)
+    return points[idx]
+
 all_depth_frames = []
+frame_idx = 0
+
+if USE_RERUN and rr is not None:
+    rr.init("paveception", spawn=RERUN_SPAWN_VIEWER)
+    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN)
 
 while True:
     # Read a frame from the video
@@ -261,6 +282,36 @@ while True:
         voxel_size_m=CLUSTER_VOXEL_SIZE_M,
         min_size_m=OBSTACLE_MIN_SIZE_M,
     )
+
+    if USE_RERUN and rr is not None:
+        rr.set_time_sequence("frame", frame_idx)
+        rr.log("camera/color", rr.Image(frame_bgr))
+        rr.log("camera/depth", rr.DepthImage(depth_image, meter=1.0))
+        rr.log("camera/mask/ground", rr.SegmentationImage(ground_mask.astype(np.uint8)))
+        rr.log("camera/mask/collision", rr.SegmentationImage(collision_mask.astype(np.uint8)))
+
+        ground_points = np.column_stack((x3d[ground_mask], y3d[ground_mask], z3d[ground_mask]))
+        ground_points = maybe_downsample_points(ground_points, RERUN_MAX_POINTS)
+        if ground_points.shape[0] > 0:
+            rr.log("world/points/ground", rr.Points3D(ground_points, colors=[80, 220, 80], radii=0.01))
+
+        collision_points_log = np.column_stack((x3d[collision_mask], y3d[collision_mask], z3d[collision_mask]))
+        collision_points_log = maybe_downsample_points(collision_points_log, RERUN_MAX_POINTS)
+        if collision_points_log.shape[0] > 0:
+            rr.log("world/points/collision", rr.Points3D(collision_points_log, colors=[255, 120, 120], radii=0.012))
+
+        if obstacle_clusters:
+            centers = np.array([o["centroid"] for o in obstacle_clusters], dtype=np.float32)
+            sizes = np.array([o["size_m"] for o in obstacle_clusters], dtype=np.float32)
+            rr.log(
+                "world/obstacles/centroids",
+                rr.Points3D(
+                    centers,
+                    colors=np.tile(np.array([[80, 120, 255]], dtype=np.uint8), (len(centers), 1)),
+                    radii=np.clip(0.5 * sizes, 0.05, 0.6),
+                ),
+            )
+        rr.log("metrics/obstacle_count", rr.Scalars([len(obstacle_clusters)]))
 
     all_depth_frames.append(depth_image)
 
@@ -452,6 +503,8 @@ while True:
     else:
         # Break the loop video feed is cut
         break
+
+    frame_idx += 1
 
 all_depth_frames = np.stack(all_depth_frames, axis=0)  # shape (num_frames, H, W)
 print("Saving depth frames to depth_frames.npy...")
