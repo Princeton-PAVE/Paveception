@@ -8,7 +8,7 @@ import pyrealsense2 as rs
 
 model = YOLOE("yoloe-11l-seg.pt")
 model = model.to("cuda")
-names = ["chair"]
+names = ["person"]
 model.set_classes(names, model.get_text_pe(names))
 
 # Loop through the video frames
@@ -18,9 +18,14 @@ i = 0
 interval = 1
 
 pipeline = rs.pipeline()
+ctx = rs.context()
+
+serials = [ d.get_info(rs.camera_info.serial_number) for d in ctx.devices]
+print(f"Serials: {serials}")
 config = rs.config()
-config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
-config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 30)
+config.enable_device(serials[0])
+config.enable_stream(rs.stream.color)
+config.enable_stream(rs.stream.depth)
 profile = pipeline.start(config)
 depth_sensor = profile.get_device().first_depth_sensor()
 # depth_sensor.set_option(rs.option.exposure, 1000)  # microseconds, lower = faster shutter
