@@ -169,6 +169,11 @@ while True:
         if moveYOLOWindow:
             cv2.moveWindow("YOLO11 Tracking", 700, 0)
             moveYOLOWindow=False
+        
+        cv2.imshow("Depth", cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=255.0 / RADAR_MAX_RANGE_M), cv2.COLORMAP_JET))
+        if moveMaskWindow:
+            cv2.moveWindow("Depth", 700, 500)
+            moveMaskWindow = False
 
         # Break the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord("q"):
