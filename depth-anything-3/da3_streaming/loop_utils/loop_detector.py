@@ -138,7 +138,7 @@ class LoopDetector:
             },
         )
 
-        model.load_state_dict(torch.load(self.ckpt_path))
+        model.load_state_dict(torch.load(self.ckpt_path, map_location=torch.device('cpu')))
         model = model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model.to(device)
