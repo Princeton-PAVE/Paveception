@@ -67,6 +67,87 @@ def fit_ground_plane_ransac(points, iterations=150, dist_thresh=0.05):
     refined_plane = refine_plane_svd(points[best_inlier_mask])
     return refined_plane
 
+
+def voxel_downsample(points, voxel_size):
+    if points.shape[0] == 0:
+        return points
+    vox = np.floor(points / voxel_size).astype(np.int32)
+    _, unique_idx = np.unique(vox, axis=0, return_index=True)
+    return points[np.sort(unique_idx)]
+
+
+def dbscan_3d(points, eps=0.25, min_samples=12):
+    n = points.shape[0]
+    if n == 0:
+        return np.array([], dtype=np.int32)
+
+    labels = np.full(n, -1, dtype=np.int32)
+    visited = np.zeros(n, dtype=bool)
+    cluster_id = 0
+    eps2 = eps * eps
+
+    def region_query(idx):
+        delta = points - points[idx]
+        dist2 = np.einsum("ij,ij->i", delta, delta)
+        return np.where(dist2 <= eps2)[0]
+
+    for i in range(n):
+        if visited[i]:
+            continue
+        visited[i] = True
+        neighbors = region_query(i)
+
+        if neighbors.size < min_samples:
+            labels[i] = -1
+            continue
+
+        labels[i] = cluster_id
+        seed = list(neighbors.tolist())
+        seed_set = set(seed)
+        k = 0
+        while k < len(seed):
+            j = seed[k]
+            if not visited[j]:
+                visited[j] = True
+                nbr_j = region_query(j)
+                if nbr_j.size >= min_samples:
+                    for q in nbr_j.tolist():
+                        if q not in seed_set:
+                            seed.append(q)
+                            seed_set.add(q)
+            if labels[j] == -1:
+                labels[j] = cluster_id
+            k += 1
+
+        cluster_id += 1
+
+    return labels
+
+
+def extract_obstacle_clusters(collision_points, eps_m, min_samples, voxel_size_m, min_size_m):
+    points_ds = voxel_downsample(collision_points, voxel_size_m)
+    labels = dbscan_3d(points_ds, eps=eps_m, min_samples=min_samples)
+    obstacles = []
+    for label in np.unique(labels):
+        if label < 0:
+            continue
+        cluster = points_ds[labels == label]
+        if cluster.shape[0] == 0:
+            continue
+
+        centroid = np.mean(cluster, axis=0)
+        extents = np.ptp(cluster, axis=0)
+        size_m = float(np.max(extents))
+        if size_m < min_size_m:
+            continue
+
+        obstacles.append({
+            "centroid": centroid,
+            "size_m": size_m,
+            "num_points": int(cluster.shape[0]),
+        })
+    return obstacles
+
 # Load the YOLO11 model
 # model = YOLO("/Users/mayanksengupta/Desktop/CV_Training/runs/segment/train3/weights/best.pt")
 
@@ -115,6 +196,13 @@ GROUND_MAX_DEPTH_M = 8.0
 GROUND_MASK_RATIO = 0.50
 ABOVE_GROUND_MAX_HEIGHT_M = 0.6
 
+CLUSTER_EPS_M = 0.28
+CLUSTER_MIN_SAMPLES = 14
+CLUSTER_VOXEL_SIZE_M = 0.06
+OBSTACLE_MIN_SIZE_M = 0.15
+OBSTACLE_DRAW_SIZE_SCALE_M = 0.6
+CLUSTER_MAX_POINTS_FOR_RUNTIME = 6000
+
 all_depth_frames = []
 
 while True:
@@ -160,6 +248,19 @@ while True:
         valid_for_ground = (z3d > GROUND_MIN_DEPTH_M) & (z3d < GROUND_MAX_DEPTH_M)
         ground_mask = valid_for_ground & (distances < GROUND_RANSAC_THRESH_M)
         collision_mask = valid_for_ground & (~ground_mask) & (distances < ABOVE_GROUND_MAX_HEIGHT_M)
+
+    collision_points = np.column_stack((x3d[collision_mask], y3d[collision_mask], z3d[collision_mask]))
+    if collision_points.shape[0] > CLUSTER_MAX_POINTS_FOR_RUNTIME:
+        sample_idx = np.random.choice(collision_points.shape[0], CLUSTER_MAX_POINTS_FOR_RUNTIME, replace=False)
+        collision_points = collision_points[sample_idx]
+
+    obstacle_clusters = extract_obstacle_clusters(
+        collision_points,
+        eps_m=CLUSTER_EPS_M,
+        min_samples=CLUSTER_MIN_SAMPLES,
+        voxel_size_m=CLUSTER_VOXEL_SIZE_M,
+        min_size_m=OBSTACLE_MIN_SIZE_M,
+    )
 
     all_depth_frames.append(depth_image)
 
@@ -278,6 +379,42 @@ while True:
             cv2.circle(radar_img, (px, py), point_radius, color, -1)
             txt = f"{d:.1f}m"
             cv2.putText(radar_img, txt, (px + txt_offset_x, py - txt_offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+
+        # Plot clustered obstacle candidates as blue circles (size reflects 3D obstacle extent).
+        for obs in obstacle_clusters:
+            cx3, _, cz3 = obs["centroid"]
+            if cz3 <= 0:
+                continue
+            angle_deg = float(np.degrees(np.arctan2(cx3, cz3)))
+            depth_m = float(cz3)
+            d = min(max(depth_m, 0.0), RADAR_MAX_RANGE_M)
+            r = int((d / RADAR_MAX_RANGE_M) * max_radius)
+            theta = np.radians(angle_deg)
+            px = int(cx + r * np.sin(theta))
+            py = int(cy - r * np.cos(theta))
+
+            size_m = obs["size_m"]
+            cluster_radius = int(np.clip((size_m / OBSTACLE_DRAW_SIZE_SCALE_M) * point_radius * 1.8, point_radius, point_radius * 4))
+            cv2.circle(radar_img, (px, py), cluster_radius, (255, 0, 0), 2)
+            cv2.putText(
+                radar_img,
+                f"{size_m:.2f}m",
+                (px + txt_offset_x, py + int(1.5 * txt_offset_y)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                (255, 120, 120),
+                thickness,
+            )
+
+        cv2.putText(
+            radar_img,
+            f"Clusters: {len(obstacle_clusters)}",
+            (int(0.01 * radar_w), int(0.09 * radar_h)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (220, 180, 180),
+            thickness,
+        )
 
         cv2.imshow("Radar", radar_img)
         if moveMaskWindow:
