@@ -80,6 +80,7 @@ moveYOLOWindow = True
 moveMaskWindow = True
 moveDepthWindow = True
 moveGroundMaskWindow = True
+moveCollisionMaskWindow = True
 i = 0
 interval = 1
 
@@ -111,6 +112,8 @@ GROUND_MIN_DEPTH_M = 0.5
 GROUND_RANSAC_THRESH_M = 0.05
 GROUND_RANSAC_ITERS = 150
 GROUND_MAX_DEPTH_M = 8.0
+GROUND_MASK_RATIO = 0.50
+ABOVE_GROUND_MAX_HEIGHT_M = 0.6
 
 all_depth_frames = []
 
@@ -133,11 +136,11 @@ while True:
 
     x3d, y3d, z3d = depth_to_xyz(depth_image, depth_intrinsics)
     h, w = depth_image.shape
-    bottom_half_mask = np.zeros((h, w), dtype=bool)
-    bottom_half_mask[h // 2 :, :] = True
+    bottom_mask = np.zeros((h, w), dtype=bool)
+    bottom_mask[int(h * GROUND_MASK_RATIO):, :] = True
 
     candidate_mask = (
-        bottom_half_mask
+        bottom_mask
         & (z3d > GROUND_MIN_DEPTH_M)
         & (z3d < GROUND_MAX_DEPTH_M)
     )
@@ -150,11 +153,13 @@ while True:
     )
 
     ground_mask = np.zeros_like(depth_image, dtype=bool)
+    collision_mask = np.zeros_like(depth_image, dtype=bool)
     if plane is not None:
         a, b, c, d = plane
         distances = np.abs(a * x3d + b * y3d + c * z3d + d)
         valid_for_ground = (z3d > GROUND_MIN_DEPTH_M) & (z3d < GROUND_MAX_DEPTH_M)
         ground_mask = valid_for_ground & (distances < GROUND_RANSAC_THRESH_M)
+        collision_mask = valid_for_ground & (~ground_mask) & (distances < ABOVE_GROUND_MAX_HEIGHT_M)
 
     all_depth_frames.append(depth_image)
 
@@ -192,11 +197,16 @@ while True:
                         (mask.shape[1], mask.shape[0]),
                         interpolation=cv2.INTER_NEAREST,
                     ).astype(bool)
+                    collision_mask_resized = cv2.resize(
+                        collision_mask.astype(np.uint8),
+                        (mask.shape[1], mask.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    ).astype(bool)
 
                     mask_bool = mask > 0.5
                     valid_obj_pixels = (
                         mask_bool
-                        & (~ground_mask_resized)
+                        & collision_mask_resized
                         & (depth_image_resized > GROUND_MIN_DEPTH_M)
                     )
                     valid_depth_values = depth_image_resized[valid_obj_pixels]
@@ -291,6 +301,13 @@ while True:
         if moveGroundMaskWindow:
             cv2.moveWindow("Ground Mask", 0, 0)
             moveGroundMaskWindow = False
+
+        collision_vis = np.zeros_like(depth_image, dtype=np.uint8)
+        collision_vis[collision_mask] = 255
+        cv2.imshow("Collision Mask", collision_vis)
+        if moveCollisionMaskWindow:
+            cv2.moveWindow("Collision Mask", 350, 0)
+            moveCollisionMaskWindow = False
 
         # Break the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord("q"):
