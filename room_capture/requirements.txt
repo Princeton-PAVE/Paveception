@@ -1,0 +1,8 @@
+rerun-sdk>=0.20
+pillow>=10
+pillow-heif>=0.18
+piexif>=1.1
+numpy
+opencv-python
+huggingface-hub>=0.24
+python-dotenv>=1.0
