@@ -64,16 +64,34 @@ def colorize_depth(depth: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Logging
+# Recording setup
 # ---------------------------------------------------------------------------
 
-def init_world(app_name: str = "RoomCapture", save_path: str | None = None) -> None:
-    """Initialize the Rerun recording and log the static world frame."""
-    rr.init(app_name, spawn=save_path is None)
-    if save_path:
+def init_world(
+    app_name: str = "RoomCapture",
+    save_path: str | None = None,
+    spawn: bool = True,
+) -> None:
+    """Initialize a Rerun recording and log the static world frame.
+
+    Exactly one sink is set up: either a viewer (spawn) or a file (save_path).
+    They are mutually exclusive because rerun's `save()` replaces the current
+    sink, which silently drops later logs from the spawned viewer.
+    """
+    if save_path is not None:
+        # File-only mode: no viewer.
+        rr.init(app_name, spawn=False)
         rr.save(save_path)
+    else:
+        rr.init(app_name, spawn=spawn)
+
+    # Static world frame so it's visible regardless of the time cursor.
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
 
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 
 def log_camera(
     idx: int,
@@ -82,33 +100,63 @@ def log_camera(
     intrinsic: np.ndarray,
     extrinsic_3x4: np.ndarray,
     image_plane_distance: float = 0.35,
+    static: bool = True,
+    log_depth_image: bool = False,
 ) -> np.ndarray:
-    """Log one camera (Transform3D + Pinhole + RGB + DepthImage).
+    """Log one camera (Transform3D + Pinhole + RGB image).
 
     Returns the (4, 4) camera-to-world matrix so callers can reuse it for
     point-cloud back-projection.
+
+    Args:
+        static: When True (the default) every component is logged as static so
+                it's visible at all time cursors. For a one-shot multi-view
+                reconstruction this is what you want; set False only when the
+                pipeline is feeding a real timeline.
+        log_depth_image: When True, also log the depth map as a DepthImage
+                under the pinhole. Rerun auto-backprojects any DepthImage
+                that's a child of a Pinhole into a colormapped 3D point
+                cloud, which competes with the true-color merged cloud at
+                ``world/points``. Default False. If you want the 2D depth
+                preview without the 3D heat map, log the depth image from the
+                caller to a path that is NOT under the pinhole (e.g.
+                ``depth_previews/camera_{idx}``).
     """
     c2w = w2c_to_c2w(extrinsic_3x4)
     H, W = rgb.shape[:2]
 
+    # Cast to plain python lists so rerun doesn't quietly reject odd ndarray
+    # dtypes (e.g. non-contiguous float64 views).
+    translation = np.asarray(c2w[:3, 3], dtype=np.float32).reshape(3).tolist()
+    rotation = np.asarray(c2w[:3, :3], dtype=np.float32).reshape(3, 3).tolist()
+    K_list = np.asarray(intrinsic, dtype=np.float32).reshape(3, 3).tolist()
+
     rr.log(
         f"world/camera_{idx}",
-        rr.Transform3D(
-            translation=c2w[:3, 3],
-            mat3x3=c2w[:3, :3],
-        ),
+        rr.Transform3D(translation=translation, mat3x3=rotation),
+        static=static,
     )
     rr.log(
         f"world/camera_{idx}",
         rr.Pinhole(
-            image_from_camera=intrinsic.tolist(),
+            image_from_camera=K_list,
             resolution=[W, H],
             camera_xyz=rr.ViewCoordinates.RIGHT_HAND_Y_DOWN,
             image_plane_distance=image_plane_distance,
         ),
+        static=static,
     )
-    rr.log(f"world/camera_{idx}/image", rr.Image(rgb))
-    rr.log(f"world/camera_{idx}/depth", rr.DepthImage(depth, meter=1.0))
+    rgb_c = np.ascontiguousarray(rgb, dtype=np.uint8)
+    rr.log(f"world/camera_{idx}/image", rr.Image(rgb_c), static=static)
+
+    if log_depth_image and depth.shape[:2] == rgb.shape[:2]:
+        depth_c = np.ascontiguousarray(depth, dtype=np.float32)
+        rr.log(
+            f"world/camera_{idx}/depth",
+            rr.DepthImage(depth_c, meter=1.0),
+            static=static,
+        )
+
     return c2w
 
 
@@ -123,25 +171,35 @@ def log_merged_point_cloud(
     max_depth: float = 300.0,
     sample_ratio: float = 0.15,
     entity_path: str = "world/points",
+    static: bool = True,
 ) -> int:
     """Back-project every (rgb, depth, K, c2w) tuple and log a single merged cloud.
 
-    Returns the number of points logged.
+    Returns the number of points logged (post-sampling).
     """
     all_pts: list[np.ndarray] = []
     all_cols: list[np.ndarray] = []
 
     for i, (rgb, depth, K, c2w) in enumerate(zip(rgbs, depths, intrinsics, c2ws)):
-        pts_world = depth_to_world_points(depth, K, c2w)
-        colors = rgb.reshape(-1, 3)
+        pts_world = depth_to_world_points(depth, K, c2w).astype(np.float32)
+        colors = np.ascontiguousarray(rgb, dtype=np.uint8).reshape(-1, 3)
 
         depth_flat = depth.reshape(-1)
-        valid = (depth_flat > min_depth) & (depth_flat < max_depth) & np.isfinite(depth_flat)
+        valid = (
+            (depth_flat > min_depth)
+            & (depth_flat < max_depth)
+            & np.isfinite(depth_flat)
+        )
+        # NaN/Inf defense on the backprojected coordinates themselves.
+        valid = valid & np.isfinite(pts_world).all(axis=1)
 
         if confs is not None:
             conf_flat = np.asarray(confs[i], dtype=np.float32).reshape(-1)
             if conf_flat.shape[0] == valid.shape[0]:
-                thresh = float(np.percentile(conf_flat[valid], conf_percentile)) if valid.any() else 0.0
+                if valid.any():
+                    thresh = float(np.percentile(conf_flat[valid], conf_percentile))
+                else:
+                    thresh = 0.0
                 valid = valid & (conf_flat >= thresh)
 
         pts_world = pts_world[valid]
@@ -153,14 +211,28 @@ def log_merged_point_cloud(
             pts_world = pts_world[idx]
             colors = colors[idx]
 
-        all_pts.append(pts_world)
-        all_cols.append(colors)
+        print(
+            f"    view {i}: {int(valid.sum()):>8,} valid, "
+            f"{len(pts_world):>8,} after sample "
+            f"(depth min={float(depth_flat[np.isfinite(depth_flat)].min() if np.isfinite(depth_flat).any() else 0):.3f}, "
+            f"max={float(depth_flat[np.isfinite(depth_flat)].max() if np.isfinite(depth_flat).any() else 0):.3f})"
+        )
+
+        if len(pts_world) > 0:
+            all_pts.append(pts_world)
+            all_cols.append(colors)
 
     if not all_pts:
+        print("[rerun_logging] No valid points survived filtering; "
+              "nothing logged to world/points.")
         return 0
 
     merged_pts = np.concatenate(all_pts, axis=0)
     merged_cols = np.concatenate(all_cols, axis=0)
 
-    rr.log(entity_path, rr.Points3D(positions=merged_pts, colors=merged_cols))
+    rr.log(
+        entity_path,
+        rr.Points3D(positions=merged_pts, colors=merged_cols, radii=0.005),
+        static=static,
+    )
     return int(len(merged_pts))

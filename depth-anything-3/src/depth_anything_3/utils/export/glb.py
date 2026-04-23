@@ -180,7 +180,11 @@ def export_to_glb(
 
     if export_depth_vis:
         export_to_depth_vis(prediction, export_dir)
-        os.system(f"cp -r {export_dir}/depth_vis/0000.jpg {export_dir}/scene.jpg")
+        import shutil
+        src = os.path.join(export_dir, "depth_vis", "0000.jpg")
+        dst = os.path.join(export_dir, "scene.jpg")
+        if os.path.exists(src):
+            shutil.copy(src, dst)
     return out_path
 
 

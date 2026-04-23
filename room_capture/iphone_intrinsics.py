@@ -127,12 +127,19 @@ def iphone16_pro_fallback_K(
     height: int,
     lens: Literal["main", "ultrawide"] = "main",
 ) -> np.ndarray:
-    """Hard-coded iPhone 16 Pro K for the chosen lens (no EXIF required)."""
+    """Hard-coded iPhone 16 Pro K for the chosen lens (no EXIF required).
+
+    The 35mm-equivalent HFoV is measured along the sensor's long axis, so the
+    focal-length formula uses ``max(width, height)``. This makes the K matrix
+    orientation-invariant: portrait and landscape shots from the same lens
+    produce consistent focal lengths (just swapped cx/cy).
+    """
     if lens not in _LENS_F35:
         raise ValueError(f"unknown lens {lens!r}; expected 'main' or 'ultrawide'")
     hfov_deg = _hfov_from_f35(_LENS_F35[lens])
     divisor = _focal_divisor_from_hfov(hfov_deg)
-    fx = fy = float(width) / divisor
+    long_side_px = float(max(width, height))
+    fx = fy = long_side_px / divisor
     cx = (float(width) - 1.0) / 2.0
     cy = (float(height) - 1.0) / 2.0
     return np.array(
@@ -167,7 +174,10 @@ def build_K(
         f35 = _to_float(_exif_get(exif, "FocalLengthIn35mmFormat"))
     if f35 and f35 > 0:
         hfov_rad = 2.0 * math.atan(36.0 / (2.0 * f35))
-        fx = float(W) / (2.0 * math.tan(hfov_rad / 2.0))
+        # HFoV is along the sensor's long axis; use max(W, H) so the formula
+        # is correct whether the image is portrait or landscape.
+        long_side_px = float(max(W, H))
+        fx = long_side_px / (2.0 * math.tan(hfov_rad / 2.0))
         fy = fx
         cx = (float(W) - 1.0) / 2.0
         cy = (float(H) - 1.0) / 2.0
@@ -204,7 +214,9 @@ def build_K(
             [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
             dtype=np.float32,
         )
-        hfov_deg = math.degrees(2.0 * math.atan(float(W) / (2.0 * fx)))
+        # HFoV is measured along the long axis so the classifier doesn't flip
+        # from portrait to landscape on the same lens.
+        hfov_deg = math.degrees(2.0 * math.atan(float(max(W, H)) / (2.0 * fx)))
         # Classify by inferred HFoV (wider than ~90 deg -> ultra-wide).
         detected_lens = "ultrawide" if hfov_deg >= 90.0 else "main"
         lens_label = lens if lens != "auto" else detected_lens

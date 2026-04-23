@@ -74,11 +74,14 @@ on startup so you can confirm the token was picked up.
      FoV captures more wall area per shot but has more barrel distortion (DA3
      still assumes a pure pinhole model, so pose can be a touch noisier).
    - `--no-gs` to skip gs_ply/gs_video
-   - `--no-rerun` for headless mode (still writes `.rrd`)
+   - `--rrd PATH` to write a Rerun recording file instead of spawning the viewer
+     (rerun allows only one sink at a time, so viewer and file are mutually
+     exclusive - pick one). Open the file later with `rerun PATH`.
+   - `--no-rerun` for fully headless mode (no viewer, no .rrd, just GLB/npz/GS)
    - `--process-res 504`
 
 3. Artifacts land in `room_capture/output/`:
-   - `room.rrd` - Rerun recording (open with `rerun room.rrd`)
+   - `*.rrd` - Rerun recording (only when `--rrd` is passed; open with `rerun <file>.rrd`)
    - `*.glb` - point cloud + camera wireframes
    - `mini.npz` - depth, conf, extrinsics, intrinsics
    - `*_3dgs.ply` - 3D Gaussian Splat (open in

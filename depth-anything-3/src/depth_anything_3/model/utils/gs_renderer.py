@@ -34,6 +34,7 @@ from depth_anything_3.utils.logger import logger
 try:
     from gsplat import rasterization
 except ImportError:
+    rasterization = None
     logger.warn(
         "Dependency `gsplat` is required for rendering 3DGS. "
         "Install via: pip install git+https://github.com/nerfstudio-project/"
@@ -55,6 +56,12 @@ def render_3dgs(
     torch.Tensor,  # "batch_views 3 height width"
     torch.Tensor,  # "batch_views height width"
 ]:
+    if rasterization is None:
+        raise ImportError(
+            "gsplat is not installed; cannot render 3DGS. "
+            "Install via: pip install git+https://github.com/nerfstudio-project/"
+            "gsplat.git@0b4dddf04cb687367602c01196913cde6a743d70"
+        )
     # extract gaussian params
     gaussian_means = gaussian.means
     gaussian_scales = gaussian.scales
@@ -99,6 +106,12 @@ def render_3dgs(
         return full_attr[idx]
 
     for i in range(batch_scene):
+        # `einops.repeat(..., "i j -> v i j", v=num_view)` returns an expanded
+        # (broadcast) tensor where every `v` slice aliases the same storage,
+        # so writing `K[:, 0, 0] = ...` on PyTorch 2.x raises "more than one
+        # element of the written-to tensor refers to a single memory location".
+        # `.clone()` (or `.contiguous()`) materializes independent memory per
+        # view so the per-view focal length assignment is well-defined.
         K = repeat(
             torch.tensor(
                 [
@@ -109,7 +122,7 @@ def render_3dgs(
             ),
             "i j -> v i j",
             v=num_view,
-        ).to(gaussian_means)
+        ).to(gaussian_means).clone()
         K[:, 0, 0] = focal_length_x.reshape(batch_scene, num_view)[i]
         K[:, 1, 1] = focal_length_y.reshape(batch_scene, num_view)[i]
 
