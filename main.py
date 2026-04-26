@@ -1,126 +1,86 @@
+import rerun as rr
+import trimesh
+from depth_anything_3.api import DepthAnything3
 import cv2
-from ultralytics import YOLO, YOLOE
-import pyrealsense2 as rs
 import numpy as np
-import time
+from sklearn.cluster import DBSCAN
 
-model = YOLOE("yoloe-11l-seg")
-# We'll target the "person" class (COCO class name)
-target_class_name = "person"
 
-# Configure Intel RealSense
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-profile = pipeline.start(config)
-depth_sensor = profile.get_device().first_depth_sensor()
-depth_scale = depth_sensor.get_depth_scale()
-align = rs.align(rs.stream.color)
+rr.init("SLAM_Visualization")
+rr.spawn()
+rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP)
+
+d = "cpu"
+model = DepthAnything3.from_pretrained("depth-anything/da3-base").to(d).eval()
+
+cap0 = cv2.VideoCapture(0)
+cap1 = cv2.VideoCapture(1)
+
+VCLIP, HCLIP, ZCLIP = 0.2, 0.3, 0.5
 
 try:
-    while True:
-        frames = pipeline.wait_for_frames()
-        frames = align.process(frames)
-        color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
-        if not color_frame or not depth_frame:
-            continue
-        frame = np.asanyarray(color_frame.get_data())  # BGR image
-        depth_image = np.asanyarray(depth_frame.get_data()).astype(float) * depth_scale
-        color_intrinsics = color_frame.get_profile().as_video_stream_profile().get_intrinsics()
+    while cap0.isOpened() and cap1.isOpened():
+        ret, frame0 = cap0.read()
+        ret, frame1 = cap1.read()
+        if not ret: continue
 
-        # Run the model (use a small resize if needed)
-        results = model(frame, conf=0.25, device='cpu')
-        print()
-        r = results[0]
-        
-        
+        img_rgb0 = cv2.cvtColor(frame0, cv2.COLOR_BGR2RGB)
+        img_rgb1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
 
-        # Prepare arrays (handles both torch Tensor or numpy)
-        boxes = []
-        classes = []
-        confidences = []
-        if hasattr(r, "boxes") and r.boxes is not None:
-            try:
-                boxes = r.boxes.xyxy.cpu().numpy()
-                classes = r.boxes.cls.cpu().numpy().astype(int)
-                confidences = r.boxes.conf.cpu().numpy()
-            except Exception:
-                boxes = np.array(r.boxes.xyxy)
-                classes = np.array(r.boxes.cls).astype(int)
-                confidences = np.array(r.boxes.conf)
+        r = model.inference(image=[img_rgb0, img_rgb1], export_dir='./', export_format="glb", process_res=504, conf_thresh_percentile=0, num_max_points=1000000000)
 
-        masks = None
-        if hasattr(r, "masks") and r.masks is not None:
-            try:
-                masks = r.masks.data.cpu().numpy()  # shape: (N, H, W)
-            except Exception:
-                masks = np.array(r.masks.data)
+        scene = trimesh.load("scene.glb")
 
-        annotated = r.plot()
+        points = scene.geometry['geometry_0'].vertices
+        colors = scene.geometry['geometry_0'].visual.vertex_colors
 
-        for i, cls in enumerate(classes):
-            print(f"i={i}, cls={cls}")
-            name = model.model.names[cls] if hasattr(model, "model") and hasattr(model.model, "names") else model.names.get(cls, str(cls))
-            if name != target_class_name:
-                continue
+        clip1 = np.logical_and(points[:,0] > -HCLIP, points[:,0] < HCLIP)
+        clip2 = np.logical_and(points[:,1] > -VCLIP, points[:,1] < VCLIP)
+        clip3 = np.logical_and(points[:,2] > -ZCLIP, points[:,2] < ZCLIP)
+        clip = np.logical_and(clip1, clip2)
+        clip = np.logical_and(clip, clip3)
+        points_to_cluster = points[clip]
 
-            # Draw mask if available
-            if masks is not None and i < masks.shape[0]:
-                mask = masks[i].astype(bool)
-                color = (0, 255, 0)  # green for person
-                colored_mask = np.zeros_like(annotated, dtype=np.uint8)
-                colored_mask[mask] = color
-                annotated = cv2.addWeighted(annotated, 1.0, colored_mask, 0.5, 0)
+        # --- Clustering and Bounding ---
+        if len(points_to_cluster) > 10:
+            clustering = DBSCAN(eps=0.025, min_samples=20).fit(points_to_cluster)
+            labels = clustering.labels_
+            
+            unique_labels = set(labels)
+            if -1 in unique_labels: unique_labels.remove(-1)
 
-            # Draw bounding box and label
-            x1, y1, x2, y2 = boxes[i].astype(int)
-            conf = confidences[i] if len(confidences) > i else 0.0
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 200, 0), 2)
-            label = f"{name} {conf:.2f}"
-            cv2.putText(annotated, label, (x1, max(20, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,200,0), 2)
+            box_centers = []
+            box_sizes = []
+            box_colors = []
 
-            # Get median distance
-            if masks is not None and i < masks.shape[0]:
-                mask = masks[i].astype(bool)
-                # Resize mask to match depth/color frame if necessary
-                # Lowkey shouldnt need
-                h, w = depth_image.shape[:2]
-                if mask.shape[:2] != (h, w):
-                    mask_resized = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
-                else:
-                    mask_resized = mask
+            for label in unique_labels:
+                cluster_mask = (labels == label)
+                cluster_points = points_to_cluster[cluster_mask]
 
-                # Extract valid depth values under the mask
-                # mask_resized = mask
+                min_bound = np.min(cluster_points, axis=0)
+                max_bound = np.max(cluster_points, axis=0)
+                
+                center = (min_bound + max_bound) / 2
+                size = max_bound - min_bound
+                
+                box_centers.append(center)
+                box_sizes.append(size)
+                box_colors.append([(label * 50) % 255, (label * 80) % 255, (label * 120) % 255])
+            if box_centers:
+                rr.log(
+                    "world/boxes",
+                    rr.Boxes3D(
+                        centers=box_centers,
+                        sizes=box_sizes,
+                        colors=box_colors
+                    )
+                )
 
-                masked_depth = depth_image[mask_resized]
-                masked_depth = masked_depth[masked_depth > 0]
-                median_distance = float('nan') if masked_depth.size == 0 else float(np.median(masked_depth))
+        rr.log("world/point_cloud", rr.Points3D(points, colors=colors))
 
-                # Compute center of mass of the mask (in pixel coordinates)
-                ys, xs = np.where(mask_resized)
-                if xs.size:
-                    center_x = xs.mean()
-                    center_y = ys.mean()
-                    cv2.circle(annotated, (int(center_x), int(center_y)), 4, (0,0,255), -1)
-
-                    # Horizontal angle in degrees relative to camera principal point using intrinsics
-                    angle_rad = np.arctan2((center_x - color_intrinsics.ppx), color_intrinsics.fx)
-                    angle_deg = np.degrees(angle_rad)
-                else:
-                    center_x = center_y = np.nan
-                    angle_deg = np.nan
-
-                # Annotate median distance and angle
-                info = f"{median_distance:.2f}m {angle_deg:+.1f}deg"
-                cv2.putText(annotated, info, (x1, y2 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,200,0), 2)
-
-        cv2.imshow("Paveception - RealSense (press q to quit)", annotated)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
+except KeyboardInterrupt as k:
+    print("Stopping.")
 finally:
-    pipeline.stop()
+    cap0.release()
+    cap1.release()
     cv2.destroyAllWindows()

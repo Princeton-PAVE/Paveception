@@ -5,6 +5,7 @@ from torch import device, cuda
 from depth_anything_3.api import DepthAnything3
 import numpy as np
 import matplotlib.pyplot as plt
+import cv2
 
 # Load model from Hugging Face Hub
 d = device("cuda" if cuda.is_available() else "cpu")

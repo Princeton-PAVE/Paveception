@@ -8,6 +8,8 @@ from utils import K
 
 import rerun as rr
 from sklearn.cluster import DBSCAN
+from depth_anything_3.api import DepthAnything3
+from torch import device, cuda
 
 # Import orientation fitting utilities
 from orientationfit import process_chair_points
@@ -17,10 +19,14 @@ rr.spawn()
 
 rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
 
-model = YOLOE("yoloe-26s-seg.pt")
+yolo = YOLOE("yoloe-26s-seg.pt")
 names = ["chair"]
-model.set_classes(names, model.get_text_pe(names))
+yolo.set_classes(names, yolo.get_text_pe(names))
 pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
+# d = device("cuda" if cuda.is_available() else "cpu")
+# model = DepthAnything3.from_pretrained("depth-anything/da3-small")
+# model = model.to(device=d)
+# model.eval()
 
 def homogenize(points):
     addition = np.expand_dims(np.ones(points.shape[0]), axis=-1)
@@ -46,10 +52,14 @@ f = 10           # Number of frames to skip before using reference
 frame_count = 0
 reference_top_rows = None
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 while cap.isOpened():
     ret, frame = cap.read()
+    if frame is None:
+        continue
+    # s = frame.shape[:-1]
+    # s = s[::-1]
     frame = cv2.resize(frame, None, fx=shrink, fy=shrink)
 
     if not ret:
@@ -57,21 +67,24 @@ while cap.isOpened():
 
     img = frame[:,:,::-1]
     disparity = np.array(pipe(Image.fromarray(img))["depth"])
+    # disparity = model.inference([img]).depth
+    # disparity = np.squeeze(disparity, axis=0)
+    # disparity = cv2.resize(disparity, s)
 
 
-    # # --- Isolate top n rows of disparity and rescale to match reference ---
-    # # For first f frames, just collect reference
-    # if frame_count < f:
-    #     if frame_count == f-1:
-    #         # Use the top n rows of the fth frame as reference
-    #         reference_top_rows = np.copy(disparity[:top_n_rows, :])
-    #     frame_count += 1
-    #     # Show normal disparity and continue
-    #     cv2.imshow('Depth Map', rescale(disparity).astype('uint8'))
-    #     key = cv2.waitKey(1)
-    #     if key & 0xFF == ord('q'):
-    #         break
-    #     continue
+    # --- Isolate top n rows of disparity and rescale to match reference ---
+    # For first f frames, just collect reference
+    if frame_count < f:
+        if frame_count == f-1:
+            # Use the top n rows of the fth frame as reference
+            reference_top_rows = np.copy(disparity[:top_n_rows, :])
+        frame_count += 1
+        # Show normal disparity and continue
+        cv2.imshow('Depth Map', rescale(disparity).astype('uint8'))
+        key = cv2.waitKey(1)
+        if key & 0xFF == ord('q'):
+            break
+        continue
 
     # # After f frames, rescale so at least 50% of top n rows match reference
     # if reference_top_rows is not None:
@@ -92,11 +105,11 @@ while cap.isOpened():
     #         disparity = disparity * best_scale
 
     # YOLO
-    results = model.track(frame, persist=True, conf=0.1)
-    annotated_frame = results[0].plot()
+    # results = yolo.track(frame, persist=True, conf=0.1)
+    # annotated_frame = results[0].plot()
 
-    cv2.imshow("Detections", annotated_frame)
-    cv2.waitKey(1)
+    # cv2.imshow("Detections", annotated_frame)
+    # cv2.waitKey(1)
 
     cv2.imshow('Depth Map', rescale(disparity).astype('uint8'))
     key = cv2.waitKey(1)
