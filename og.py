@@ -2,10 +2,16 @@ import cv2
 from ultralytics import YOLO, YOLOE
 import numpy as np
 import pyrealsense2 as rs
+import socket
+import threading
+import time
+
+from rrt_planning.plan import fill_bev_matrix, get_controls_curvy
+from rrt_planning.visualizer import BevEnv
+from rrt_planning.planner import rrt_star
 
 # Load the YOLO11 model
 # model = YOLO("/Users/mayanksengupta/Desktop/CV_Training/runs/segment/train3/weights/best.pt")
-
 model = YOLOE("yoloe-11l-seg.pt")
 model = model.to("cuda")
 names = ["chair"]
@@ -40,6 +46,11 @@ all_depth_frames = []
 controls_lock = threading.Lock()
 controls = []
 current_control = 0
+
+PLAN_WIDTH = 100
+PLAN_HEIGHT = 100
+
+GRID_SIZE = 1 # TODO units
 
 def control_loop(angle_degrees=None, object_depth=None):
     while(True):
@@ -132,77 +143,50 @@ def planning_loop():
                 # 3. access angle_degrees & object_depth
                 # control_loop(angles[ind])
             min_person = min(people, key=lambda x: x[2]) if people else None
-            #controls = planning(find_azimuth(min_person[0], min_person[2], color_intrinsics) if min_person else None, 
-                        # object_depth=min_person[2] if min_person else None)
-            
-            with controls_lock:
-                controls = controls
-                current_control = 0
-            
-            # --- Radar (half-circle) view (scalable to 720p) ---
-            # Configuration: change RADAR_RES or RADAR_MAX_RANGE_M to resize/scale
-            RADAR_RES = (1280, 720)               # target radar resolution (width, height)
-            RADAR_BG = (20, 20, 20)
-            RADAR_MAX_RANGE_M = 6.0               # meters shown on radar
-            RADAR_RING_FRACTIONS = np.linspace(0.25, 1.0, 4)
+            start = (PLAN_HEIGHT / 2, 0) # y, x
 
-            radar_w, radar_h = RADAR_RES
-            radar_img = np.full((radar_h, radar_w, 3), RADAR_BG, dtype=np.uint8)
+            # Find the goal coordinates from the closest person
+            goal = None
+            if min_person is not None:
+                min_person_depth = min_person[2]
+                # Find the point that matches this person's depth
+                for (box_mid_x, object_depth) in points:
+                    if abs(object_depth - min_person_depth) < 0.01:  # small tolerance for float comparison
+                        # Convert pixel position to BEV coordinates (y, x in grid)
+                        goal = (PLAN_HEIGHT / 2 + min_person_depth / GRID_SIZE, box_mid_x / GRID_SIZE)
+                        break
 
-            # center and sizing for semicircle
-            cx, cy = radar_w // 2, radar_h - int(0.02 * radar_h)   # small bottom margin
-            max_radius = int(min(cx * 0.95, cy * 0.9))
-            ring_color = (80, 80, 80)
+            bev = fill_bev_matrix(None)  # uint8, 0/255
 
-            # draw semicircle arcs / range rings (line thickness & font scale adapt to size)
-            thickness = max(1, radar_w // 1000)
-            font_scale = max(0.45, radar_w / 2500)
-            for r_frac in RADAR_RING_FRACTIONS:
-                r_pix = int(max_radius * r_frac)
-                cv2.ellipse(radar_img, (cx, cy), (r_pix, r_pix), 0, 180, 360, ring_color, thickness)
-                dist_label = f"{r_frac * RADAR_MAX_RANGE_M:.1f}m"
-                txt_x = cx + r_pix - int(0.04 * radar_w)
-                txt_y = cy - int(0.02 * radar_h)
-                cv2.putText(radar_img, dist_label, (txt_x, txt_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, ring_color, thickness)
+            env = BevEnv(bev)
+            #path comes in as List of (y,x)'s
+            if goal is not None:
+                path, nodes = rrt_star(
+                    env,
+                    start=start,
+                    goal=goal,
+                    step_size=10.0,
+                    radius=30.0,
+                    max_iter=1250,
+                    goal_thresh=15.0,
+                    rebuild_every=10,
+                    coord_order="rc",
+                )
+            else:
+                path = None
 
-            # draw center base line
-            cv2.line(radar_img, (int(0.01 * radar_w), cy), (radar_w - int(0.01 * radar_w), cy), (40, 40, 40), thickness)
-
-            # Plot detections onto radar
-            point_radius = max(4, radar_w // 320)
-            txt_offset_x = int(0.01 * radar_w)
-            txt_offset_y = int(0.01 * radar_h)
-            for (angle_deg, depth_m) in angles:
-                # clamp distance and convert to pixel radius
-                d = min(max(depth_m, 0.0), RADAR_MAX_RANGE_M)
-                r = int((d / RADAR_MAX_RANGE_M) * max_radius)
-                theta = np.radians(angle_deg)  # right-positive from center
-                px = int(cx + r * np.sin(theta))
-                py = int(cy - r * np.cos(theta))
-                color = (0, 200, 0)
-                cv2.circle(radar_img, (px, py), point_radius, color, -1)
-                txt = f"{d:.1f}m"
-                cv2.putText(radar_img, txt, (px + txt_offset_x, py - txt_offset_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
-
-            cv2.imshow("Radar", radar_img)
-            if moveMaskWindow:
-                cv2.moveWindow("Radar", 0, 500)
-                moveMaskWindow = False
-
-            # Display the annotated frame
-            cv2.imshow("YOLO11 Tracking", annotated_frame[:,:,::-1])
-            if moveYOLOWindow:
-                cv2.moveWindow("YOLO11 Tracking", 700, 0)
-                moveYOLOWindow=False
-
-
-
-                        # Break the loop if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-        else:
-            # Break the loop video feed is cut
-            break
+            controls, init_state = None, None
+            if path is not None: #sometimes there is no viable path so check this
+                init_state = (start[0], start[1]) # starting position + velocity is zero, heading angle is zero (right)
+                curr_control = get_controls_curvy(path) #not full path just these paths
+                if curr_control:
+                    print("curvy path!: " + str(controls))
+                    # Use MPC - apply the first control
+                    with controls_lock:
+                        controls = curr_control
+                        current_control = 0
+                        # First control will be executed by control_loop
+        
 
 def find_azimuth(box_mid_x, object_depth, color_intrinsics):
     if object_depth > 0:
